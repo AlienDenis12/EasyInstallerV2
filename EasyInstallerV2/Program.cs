@@ -1,125 +1,137 @@
 using Newtonsoft.Json;
+using System.Diagnostics;
 using System.IO.Compression;
-using System.Net;
-using System.Net.Http;
+using SharpCompress.Archives;
+using SharpCompress.Archives.Rar;
+using SharpCompress.Common;
 
 namespace EasyInstallerV2
 {
     class Program
     {
-        const string BASE_URL = "https://manifest.fnbuilds.services";
-        const int CHUNK_SIZE = 67108864;
+        const string BASE_URL = "https://pastebin.com/raw/gH3mkWid";
 
         public static HttpClient httpClient = new HttpClient();
 
-        class ChunkedFile
+        static async Task Download(string downloadUrl, string version, string resultPath)
         {
-            public List<int> ChunksIds = new();
-            public String File = String.Empty;
-            public long FileSize = 0;
-        }
-
-        class ManifestFile
-        {
-            public String Name = String.Empty;
-            public List<ChunkedFile> Chunks = new();
-            public long Size = 0;
-        }
-
-        static string FormatBytesWithSuffix(long bytes)
-        {
-            string[] Suffix = { "B", "KB", "MB", "GB", "TB" };
-            int i;
-            double dblSByte = bytes;
-            for (i = 0; i < Suffix.Length && bytes >= 1024; i++, bytes /= 1024)
-            {
-                dblSByte = bytes / 1024.0;
-            }
-
-            return String.Format("{0:0.##} {1}", dblSByte, Suffix[i]);
-        }
-
-        static async Task Download(ManifestFile manifest, string version, string resultPath)
-        {
-            long totalBytes = manifest.Size;
-            long completedBytes = 0;
-            int progressLength = 0;
+            string fileExtension = "";
+            string filePath = "";
 
             if (!Directory.Exists(resultPath))
                 Directory.CreateDirectory(resultPath);
 
-            SemaphoreSlim semaphore = new SemaphoreSlim(Environment.ProcessorCount * 2);
-
-            await Task.WhenAll(manifest.Chunks.Select(async chunkedFile =>
+            using (var httpClient = new HttpClient())
             {
-                await semaphore.WaitAsync();
-
                 try
                 {
-                    WebClient webClient = new WebClient();
+                    var response = await httpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, downloadUrl + ".zip"));
 
-                    string outputFilePath = Path.Combine(resultPath, chunkedFile.File);
-                    var fileInfo = new FileInfo(outputFilePath);
-
-                    if (File.Exists(outputFilePath) && fileInfo.Length == chunkedFile.FileSize)
+                    if (response.IsSuccessStatusCode)
                     {
-                        completedBytes += chunkedFile.FileSize;
-                        semaphore.Release();
-                        return;
+                        downloadUrl = downloadUrl + ".zip";
+                        fileExtension = ".zip";
                     }
-
-                    Directory.CreateDirectory(Path.GetDirectoryName(outputFilePath));
-
-                    using (FileStream outputStream = File.OpenWrite(outputFilePath))
+                    else
                     {
-                        foreach (int chunkId in chunkedFile.ChunksIds)
+                        try
                         {
-                            retry:
+                            var response2 = await httpClient.SendAsync(new HttpRequestMessage(HttpMethod.Head, downloadUrl + ".rar"));
 
-                            try
+                            if (response2.IsSuccessStatusCode)
                             {
-                                string chunkUrl = BASE_URL + $"/{version}/" + chunkId + ".chunk";
-                                var chunkData = await webClient.DownloadDataTaskAsync(chunkUrl);
-
-                                byte[] chunkDecompData = new byte[CHUNK_SIZE + 1];
-                                int bytesRead;
-                                long chunkCompletedBytes = 0;
-
-                                MemoryStream memoryStream = new MemoryStream(chunkData);
-                                GZipStream decompressionStream = new GZipStream(memoryStream, CompressionMode.Decompress);
-
-                                while ((bytesRead = await decompressionStream.ReadAsync(chunkDecompData, 0, chunkDecompData.Length)) > 0)
-                                {
-                                    await outputStream.WriteAsync(chunkDecompData, 0, bytesRead);
-                                    Interlocked.Add(ref completedBytes, bytesRead);
-                                    Interlocked.Add(ref chunkCompletedBytes, bytesRead);
-
-                                    double progress = (double)completedBytes / totalBytes * 100;
-                                    string progressMessage = $"\rDownloaded: {FormatBytesWithSuffix(completedBytes)} / {FormatBytesWithSuffix(totalBytes)} ({progress:F2}%)";
-
-                                    int padding = progressLength - progressMessage.Length;
-                                    if (padding > 0)
-                                        progressMessage += new string(' ', padding);
-
-                                    Console.Write(progressMessage);
-                                    progressLength = progressMessage.Length;
-                                }
-
-                                memoryStream.Close();
-                                decompressionStream.Close();
+                                downloadUrl = downloadUrl + ".rar";
+                                fileExtension = ".rar";
                             }
-                            catch (Exception ex)
-                            {
-                                goto retry;
-                            }
+                        } catch (HttpRequestException)
+                        {
+                            Console.Write("Could not download build");
+                            Thread.Sleep(3000);
                         }
                     }
                 }
-                finally
+                catch (HttpRequestException)
                 {
-                    semaphore.Release();
+                
+                    Console.Write("Could not download build");
+                    Thread.Sleep(3000);
                 }
-            }));
+            }
+
+            var progress = new Progress<string>(message =>
+            {
+                Console.Write($"\r{message}");
+            });
+
+            using (var httpClient = new HttpClient())
+            {
+                var response = await httpClient.GetAsync(downloadUrl, HttpCompletionOption.ResponseHeadersRead);
+                response.EnsureSuccessStatusCode();
+                var totalBytes = response.Content.Headers.ContentLength ?? -1L;
+
+                var progressReporter = new ProgressReporter(progress);
+
+                string fileName = $"{version}{fileExtension}";
+                filePath = Path.Combine(resultPath, fileName);
+
+                await httpClient.DownloadFileWithProgressAsync(downloadUrl, filePath, progressReporter);
+            }
+
+            if (fileExtension == ".zip")
+            {
+                using (var archive = ZipFile.OpenRead(filePath))
+                {
+                    var totalEntries = archive.Entries.Count;
+                    var entriesExtracted = 0;
+
+                    Console.WriteLine();
+                    int originalTop = Console.CursorTop;
+                    int originalLeft = Console.CursorLeft;
+
+                    foreach (var entry in archive.Entries)
+                    {
+                        var destination = Path.Combine(resultPath, entry.FullName);
+
+                        Directory.CreateDirectory(Path.GetDirectoryName(destination));
+
+                        if (!entry.FullName.EndsWith("/"))
+                        {
+                            entry.ExtractToFile(destination, true);
+                        }
+
+                        entriesExtracted++;
+                        var percentage = (double)entriesExtracted / totalEntries * 100;
+                        Console.SetCursorPosition(originalLeft, originalTop);
+                        Console.Write($"Decompressing... {percentage:F2}%");
+                    }
+                }
+            }
+            else if (fileExtension == ".rar")
+            {
+                using (var archive = RarArchive.Open(filePath))
+                {
+                    var totalSize = archive.TotalSize;
+                    var totalUnpacked = 0L;
+
+                    Console.WriteLine();
+                    int originalTop = Console.CursorTop;
+                    int originalLeft = Console.CursorLeft;
+
+                    foreach (var entry in archive.Entries.Where(entry => !entry.IsDirectory))
+                    {
+                        entry.WriteToDirectory(resultPath, new ExtractionOptions()
+                        {
+                            ExtractFullPath = true,
+                            Overwrite = true
+                        });
+
+                        totalUnpacked += entry.Size;
+                        var percentage = (double)totalUnpacked / totalSize * 100;
+                        Console.SetCursorPosition(originalLeft, originalTop);
+                        Console.WriteLine($"Decompressing... {percentage:F2}%");
+                    }
+                }
+            }
 
             Console.WriteLine("\n\nFinished Downloading.\nPress any key to exit!");
             Thread.Sleep(100);
@@ -128,7 +140,7 @@ namespace EasyInstallerV2
 
         static async Task<List<string>> GetVersionsAsync()
         {
-            var versionsResponse = await httpClient.GetStringAsync(BASE_URL + "/versions.json");
+            var versionsResponse = await httpClient.GetStringAsync(BASE_URL);
 
             if (string.IsNullOrEmpty(versionsResponse))
             {
@@ -143,25 +155,6 @@ namespace EasyInstallerV2
             }
 
             return versions;
-        }
-
-        static async Task<ManifestFile> GetManifestAsync(string version)
-        {
-            var manifestResponse = await httpClient.GetStringAsync(BASE_URL + $"/{version}/{version}.manifest");
-
-            if (string.IsNullOrEmpty(manifestResponse))
-            {
-                throw new Exception("failed to get manifest");
-            }
-
-            var manifest = JsonConvert.DeserializeObject<ManifestFile>(manifestResponse);
-
-            if (manifest == null)
-            {
-                throw new Exception("failed to parse manifest");
-            }
-
-            return manifest;
         }
 
         static async Task Main(string[] args)
@@ -197,7 +190,6 @@ namespace EasyInstallerV2
             }
 
             var targetVersion = versions[targetVersionIndex].Split("-")[1];
-            var manifest = await GetManifestAsync(targetVersion);
 
             Console.Write("Please enter a game folder location: ");
             var targetPath = Console.ReadLine();
@@ -209,7 +201,62 @@ namespace EasyInstallerV2
                 return;
             }
 
-            Download(manifest, targetVersion, targetPath).GetAwaiter().GetResult();
+            await Download($"https://cdn.fnbuilds.services/{targetVersion}", targetVersion, targetPath);
+        }
+    }
+
+    public class ProgressReporter : IProgress<string>
+    {
+        private readonly IProgress<string> _progress;
+
+        public ProgressReporter(IProgress<string> progress)
+        {
+            _progress = progress;
+        }
+
+        public void Report(string value)
+        {
+            _progress.Report(value);
+        }
+    }
+
+    public static class HttpClientExtensions
+    {
+        public static async Task DownloadFileWithProgressAsync(this HttpClient httpClient, string requestUri, string filePath, IProgress<string> progress)
+        {
+            using (var response = await httpClient.GetAsync(requestUri, HttpCompletionOption.ResponseHeadersRead))
+            {
+                response.EnsureSuccessStatusCode();
+
+                using (var stream = await response.Content.ReadAsStreamAsync())
+                {
+                    using (var fileStream = new FileStream(filePath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true))
+                    {
+                        var buffer = new byte[8192];
+                        var bytesRead = 0;
+                        var totalBytesRead = 0L;
+                        var totalBytes = response.Content.Headers.ContentLength ?? -1L;
+                        var stopwatch = Stopwatch.StartNew();
+
+                        while ((bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                        {
+                            await fileStream.WriteAsync(buffer, 0, bytesRead);
+                            totalBytesRead += bytesRead;
+
+                            if (totalBytes > 0)
+                            {
+                                var percentage = (double)totalBytesRead / totalBytes;
+                                var bytesPerSecond = totalBytesRead / stopwatch.Elapsed.TotalSeconds;
+                                var megabytesPerSecond = bytesPerSecond / (1024 * 1024);
+                                var megabytesRead = totalBytesRead / (1024.0 * 1024.0);
+                                var totalMegabytes = totalBytes / (1024.0 * 1024.0);
+
+                                progress.Report($"Downloaded: {percentage:P0} | {megabytesRead:F2}MB of {totalMegabytes:F2}MB | Speed: {megabytesPerSecond:F2}MB/s");
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
