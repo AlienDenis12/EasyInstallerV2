@@ -1,4 +1,4 @@
-# EasyInstallerV2
+# EasyInstallerV2 With More Builds
 
 ## Want to help cover egress and storage costs? Consider donating [here!](https://paypal.me/blksservers?country.x=US&locale.x=en_US)
 
