@@ -201,7 +201,7 @@ namespace EasyInstallerV2
                 return;
             }
 
-            await Download($"https://cdn.fnbuilds.services/{targetVersion}", targetVersion, targetPath);
+            await Download($"https://public.simplyblk.xyz/{targetVersion}", targetVersion, targetPath);
         }
     }
 
